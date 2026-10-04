@@ -1,0 +1,114 @@
+schema_version: "1.0"
+policy_id: hackyeah-default
+
+sanitization:
+  detectors:
+    email:
+      enabled: true
+    phone:
+      enabled: true
+    api_key:
+      enabled: true
+    secret:
+      enabled: true
+
+semantic:
+  # For external classification, change provider to openai and add a model chosen
+  # from an account-available benchmark. The application supplies no model default.
+  provider: openai
+  model: gpt-6-luna
+  timeout_ms: 8000
+  failure_policy:
+    privileged_action: BLOCK
+    prompt_actions:
+      timeout: REQUIRE_APPROVAL
+      rate_limit: REQUIRE_APPROVAL
+      malformed_output: BLOCK
+      outage: REQUIRE_APPROVAL
+  labels:
+    prompt_injection:
+      enabled: true
+    data_exfiltration:
+      enabled: true
+
+models:
+  allowed:
+    - approved-model-small
+    - approved-model-large
+
+agents:
+  support-agent:
+    allowed_tools:
+      - search_knowledge_base
+      - create_ticket
+    denied_tools:
+      - execute_shell
+  coding-agent:
+    allowed_tools:
+      - read_workspace
+      - run_tests
+    denied_tools:
+      - send_email
+
+budgets:
+  window_seconds: 3600
+  defaults:
+    max_requests: 100
+    max_input_tokens: 100000
+  per_agent:
+    coding-agent:
+      max_requests: 250
+      max_input_tokens: 500000
+
+# Highest priority wins. Equal priorities resolve with:
+# BLOCK > REQUIRE_APPROVAL > REDACT > ALLOW.
+decision_rules:
+  - id: blocked-deterministic-control
+    priority: 1000
+    when:
+      any:
+        - { fact: model.allowed, operator: eq, value: false }
+        - { fact: tool.allowed, operator: eq, value: false }
+        - { fact: budget.allowed, operator: eq, value: false }
+        - { fact: detector.api_key, operator: eq, value: true }
+        - { fact: detector.secret, operator: eq, value: true }
+    action: BLOCK
+    reason_code: DETERMINISTIC_CONTROL_FAILED
+
+  - id: high-exfiltration-risk
+    priority: 900
+    when:
+      all:
+        - { fact: semantic.data_exfiltration, operator: gte, value: 0.8 }
+    action: BLOCK
+    reason_code: DATA_EXFILTRATION_HIGH_RISK
+
+  - id: injection-review
+    priority: 800
+    when:
+      all:
+        - { fact: semantic.prompt_injection, operator: gte, value: 0.65 }
+    action: REQUIRE_APPROVAL
+    reason_code: PROMPT_INJECTION_REVIEW
+
+  - id: redact-contact-data
+    priority: 500
+    when:
+      any:
+        - { fact: detector.email, operator: eq, value: true }
+        - { fact: detector.phone, operator: eq, value: true }
+    action: REDACT
+    reason_code: CONTACT_DATA_REDACTED
+
+  - id: default-allow
+    priority: 0
+    when:
+      all:
+        - { fact: model.allowed, operator: eq, value: true }
+        - { fact: budget.allowed, operator: eq, value: true }
+    action: ALLOW
+    reason_code: POLICY_ALLOWED
+
+logging:
+  store_raw_content: false
+  retention_days: 30

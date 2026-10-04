@@ -1,0 +1,207 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hackyeah.local/schemas/control-layer-policy-v1.json",
+  "title": "HackYeah AI Control Layer Policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "policy_id", "sanitization", "semantic", "models", "agents", "budgets", "decision_rules", "logging"],
+  "properties": {
+    "schema_version": { "const": "1.0" },
+    "policy_id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+    "sanitization": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["detectors"],
+      "properties": {
+        "detectors": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["email", "phone", "api_key", "secret"],
+          "properties": {
+            "email": { "$ref": "#/$defs/detector" },
+            "phone": { "$ref": "#/$defs/detector" },
+            "api_key": { "$ref": "#/$defs/detector" },
+            "secret": { "$ref": "#/$defs/detector" }
+          }
+        }
+      }
+    },
+    "semantic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["provider", "timeout_ms", "failure_policy", "labels"],
+      "properties": {
+        "provider": { "type": "string", "minLength": 1 },
+        "model": {
+          "description": "Provider model identifier. Required by an external adapter and never supplied by application code.",
+          "type": "string",
+          "minLength": 1
+        },
+        "timeout_ms": { "type": "integer", "minimum": 100, "maximum": 30000 },
+        "failure_policy": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["privileged_action", "prompt_actions"],
+          "properties": {
+            "privileged_action": {
+              "description": "Tool calls always fail closed.",
+              "const": "BLOCK"
+            },
+            "prompt_actions": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["timeout", "rate_limit", "malformed_output", "outage"],
+              "properties": {
+                "timeout": { "$ref": "#/$defs/fallbackAction" },
+                "rate_limit": { "$ref": "#/$defs/fallbackAction" },
+                "malformed_output": { "$ref": "#/$defs/fallbackAction" },
+                "outage": { "$ref": "#/$defs/fallbackAction" }
+              }
+            }
+          }
+        },
+        "labels": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["prompt_injection", "data_exfiltration"],
+          "properties": {
+            "prompt_injection": { "$ref": "#/$defs/semanticLabel" },
+            "data_exfiltration": { "$ref": "#/$defs/semanticLabel" }
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "provider": { "const": "openai" } }, "required": ["provider"] },
+          "then": { "required": ["model"] }
+        }
+      ]
+    },
+    "models": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed"],
+      "properties": {
+        "allowed": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "agents": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": { "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$" },
+      "additionalProperties": { "$ref": "#/$defs/agent" }
+    },
+    "budgets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["window_seconds", "defaults"],
+      "properties": {
+        "window_seconds": { "type": "integer", "minimum": 1 },
+        "defaults": { "$ref": "#/$defs/budget" },
+        "per_agent": {
+          "type": "object",
+          "additionalProperties": { "$ref": "#/$defs/budget" }
+        }
+      }
+    },
+    "decision_rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/rule" }
+    },
+    "logging": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["store_raw_content", "retention_days"],
+      "properties": {
+        "store_raw_content": { "const": false },
+        "retention_days": { "type": "integer", "minimum": 1, "maximum": 3650 }
+      }
+    }
+  },
+  "$defs": {
+    "action": { "type": "string", "enum": ["ALLOW", "REDACT", "BLOCK", "REQUIRE_APPROVAL"] },
+    "fallbackAction": { "type": "string", "enum": ["BLOCK", "REQUIRE_APPROVAL"] },
+    "detector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "patterns": {
+          "description": "Optional policy-owned regex additions; built-in patterns remain versioned with the sanitizer.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+        }
+      }
+    },
+    "semanticLabel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled"],
+      "properties": { "enabled": { "type": "boolean" } }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["allowed_tools"],
+      "properties": {
+        "allowed_tools": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } },
+        "denied_tools": { "type": "array", "uniqueItems": true, "items": { "type": "string", "minLength": 1 } }
+      }
+    },
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_requests", "max_input_tokens"],
+      "properties": {
+        "max_requests": { "type": "integer", "minimum": 1 },
+        "max_input_tokens": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "condition": {
+      "oneOf": [
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["fact", "operator", "value"],
+          "properties": {
+            "fact": { "enum": ["detector.email", "detector.phone", "detector.api_key", "detector.secret", "model.allowed", "tool.allowed", "budget.allowed", "semantic.available"] },
+            "operator": { "enum": ["eq", "neq"] },
+            "value": { "type": "boolean" }
+          }
+        },
+        {
+          "type": "object", "additionalProperties": false,
+          "required": ["fact", "operator", "value"],
+          "properties": {
+            "fact": { "enum": ["semantic.prompt_injection", "semantic.data_exfiltration"] },
+            "operator": { "enum": ["gte", "gt", "lte", "lt"] },
+            "value": { "type": "number", "minimum": 0, "maximum": 1 }
+          }
+        }
+      ]
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "priority", "when", "action", "reason_code"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$" },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 10000 },
+        "when": {
+          "type": "object",
+          "additionalProperties": false,
+          "minProperties": 1,
+          "maxProperties": 1,
+          "properties": {
+            "all": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/condition" } },
+            "any": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/condition" } }
+          }
+        },
+        "action": { "$ref": "#/$defs/action" },
+        "reason_code": { "type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$" }
+      }
+    }
+  }
+}

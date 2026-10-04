@@ -1,0 +1,338 @@
+openapi: 3.1.0
+info:
+  title: HackYeah AI Control Layer API
+  version: 0.1.0
+  description: Architecture contract; no server implementation exists yet.
+servers:
+  - url: /api/v1
+security:
+  - BearerAuth: []
+paths:
+  /evaluations:
+    post:
+      operationId: evaluateRequest
+      summary: Evaluate a prompt or tool call against the active policy
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EvaluationRequest"
+      responses:
+        "200":
+          description: Deterministic policy decision
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EvaluationResponse"
+        "400":
+          $ref: "#/components/responses/Problem"
+        "422":
+          $ref: "#/components/responses/Problem"
+        "503":
+          $ref: "#/components/responses/Problem"
+  /events:
+    get:
+      operationId: listEvents
+      summary: List safe decision telemetry
+      parameters:
+        - name: cursor
+          in: query
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: decision
+          in: query
+          schema: { $ref: "#/components/schemas/Decision" }
+      responses:
+        "200":
+          description: Event page
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/EventPage"
+  /budgets:
+    get:
+      operationId: listCurrentBudgetUsage
+      summary: List current budget-window consumption
+      responses:
+        "200":
+          description: Per-agent budget use in the active window
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/BudgetUsage" }
+  /policies/active:
+    get:
+      operationId: getActivePolicyMetadata
+      summary: Read active policy metadata (not secret detector values)
+      responses:
+        "200":
+          description: Active policy metadata
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyMetadata"
+  /policies/reload:
+    post:
+      operationId: reloadPolicy
+      summary: Validate the configured YAML file and atomically activate it
+      responses:
+        "200":
+          description: Reload result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PolicyReloadResponse"
+        "409":
+          $ref: "#/components/responses/Problem"
+  /approvals:
+    get:
+      operationId: listApprovals
+      summary: List approval records
+      parameters:
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+      responses:
+        "200":
+          description: Approval records
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Approval" }
+  /approvals/{approval_id}/resolution:
+    post:
+      operationId: resolveApproval
+      summary: Resolve a pending approval exactly once
+      parameters:
+        - name: approval_id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/ApprovalResolution" }
+      responses:
+        "200":
+          description: Resolved approval
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Approval" }
+        "409":
+          $ref: "#/components/responses/Problem"
+  /health:
+    get:
+      operationId: getHealth
+      security: []
+      responses:
+        "200":
+          description: Service health
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { type: string, const: ok }
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: API key
+  responses:
+    Problem:
+      description: RFC 9457-style problem response
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    EvaluationRequest:
+      type: object
+      additionalProperties: false
+      required: [request_id, agent_id, model, input]
+      properties:
+        request_id: { type: string, format: uuid }
+        agent_id: { type: string, minLength: 1, maxLength: 128 }
+        model: { type: string, minLength: 1, maxLength: 128 }
+        estimated_input_tokens: { type: integer, minimum: 0 }
+        metadata:
+          type: object
+          additionalProperties: { type: string, maxLength: 512 }
+          maxProperties: 20
+        input:
+          oneOf:
+            - $ref: "#/components/schemas/PromptInput"
+            - $ref: "#/components/schemas/ToolCallInput"
+          discriminator:
+            propertyName: type
+            mapping:
+              prompt: "#/components/schemas/PromptInput"
+              tool_call: "#/components/schemas/ToolCallInput"
+    PromptInput:
+      type: object
+      additionalProperties: false
+      required: [type, content]
+      properties:
+        type: { type: string, const: prompt }
+        content: { type: string, minLength: 1, maxLength: 100000 }
+    ToolCallInput:
+      type: object
+      additionalProperties: false
+      required: [type, tool_name, arguments]
+      properties:
+        type: { type: string, const: tool_call }
+        tool_name: { type: string, minLength: 1, maxLength: 128 }
+        arguments:
+          description: JSON arguments serialized canonically before sanitization.
+          type: object
+          maxProperties: 100
+    Decision:
+      type: string
+      enum: [ALLOW, REDACT, BLOCK, REQUIRE_APPROVAL]
+    RiskLabel:
+      type: string
+      enum: [prompt_injection, data_exfiltration]
+    RiskSignal:
+      type: object
+      additionalProperties: false
+      required: [label, score]
+      properties:
+        label: { $ref: "#/components/schemas/RiskLabel" }
+        score: { type: number, minimum: 0, maximum: 1 }
+    RedactionSummary:
+      type: object
+      additionalProperties: false
+      required: [kind, count]
+      properties:
+        kind:
+          type: string
+          enum: [email, phone, api_key, secret]
+        count: { type: integer, minimum: 1 }
+    EvaluationResponse:
+      type: object
+      additionalProperties: false
+      required:
+        [evaluation_id, request_id, decision, reason_codes, policy_version,
+         redactions, risk_signals, created_at]
+      properties:
+        evaluation_id: { type: string, format: uuid }
+        request_id: { type: string, format: uuid }
+        decision: { $ref: "#/components/schemas/Decision" }
+        reason_codes:
+          type: array
+          items: { type: string, pattern: "^[A-Z0-9_]+$" }
+          uniqueItems: true
+        policy_version: { type: string, pattern: "^[a-f0-9]{64}$" }
+        sanitized_content:
+          description: Returned only for ALLOW or REDACT when policy permits.
+          type: string
+        redactions:
+          type: array
+          items: { $ref: "#/components/schemas/RedactionSummary" }
+        risk_signals:
+          type: array
+          items: { $ref: "#/components/schemas/RiskSignal" }
+        approval_id: { type: string, format: uuid }
+        created_at: { type: string, format: date-time }
+    Event:
+      type: object
+      additionalProperties: false
+      required:
+        [evaluation_id, request_id, agent_id, model, input_type, decision,
+         reason_codes, policy_version, input_sha256, redactions, risk_signals,
+         latency_ms, created_at]
+      properties:
+        evaluation_id: { type: string, format: uuid }
+        request_id: { type: string, format: uuid }
+        agent_id: { type: string }
+        model: { type: string }
+        input_type: { type: string, enum: [prompt, tool_call] }
+        tool_name: { type: string }
+        decision: { $ref: "#/components/schemas/Decision" }
+        reason_codes: { type: array, items: { type: string } }
+        policy_version: { type: string }
+        input_sha256: { type: string, pattern: "^[a-f0-9]{64}$" }
+        redactions:
+          type: array
+          items: { $ref: "#/components/schemas/RedactionSummary" }
+        risk_signals:
+          type: array
+          items: { $ref: "#/components/schemas/RiskSignal" }
+        estimated_input_tokens: { type: integer, minimum: 0 }
+        latency_ms: { type: integer, minimum: 0 }
+        semantic_failure:
+          type: [string, "null"]
+          enum: [timeout, rate_limit, malformed_output, outage, null]
+        created_at: { type: string, format: date-time }
+    EventPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/Event" }
+        next_cursor: { type: string }
+    BudgetUsage:
+      type: object
+      additionalProperties: false
+      required: [agent_id, window_start, requests, input_tokens, max_requests, max_input_tokens]
+      properties:
+        agent_id: { type: string }
+        window_start: { type: integer }
+        requests: { type: integer, minimum: 0 }
+        input_tokens: { type: integer, minimum: 0 }
+        max_requests: { type: integer, minimum: 1 }
+        max_input_tokens: { type: integer, minimum: 1 }
+    PolicyMetadata:
+      type: object
+      additionalProperties: false
+      required: [policy_id, schema_version, policy_version, loaded_at]
+      properties:
+        policy_id: { type: string }
+        schema_version: { type: string }
+        policy_version: { type: string, pattern: "^[a-f0-9]{64}$" }
+        loaded_at: { type: string, format: date-time }
+    PolicyReloadResponse:
+      type: object
+      additionalProperties: false
+      required: [changed, active]
+      properties:
+        changed: { type: boolean }
+        active: { $ref: "#/components/schemas/PolicyMetadata" }
+    ApprovalResolution:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status: { type: string, enum: [APPROVED, DENIED] }
+        reason: { type: string, maxLength: 500 }
+    Approval:
+      type: object
+      additionalProperties: false
+      required: [approval_id, evaluation_id, status, created_at]
+      properties:
+        approval_id: { type: string, format: uuid }
+        evaluation_id: { type: string, format: uuid }
+        status: { type: string, enum: [PENDING, APPROVED, DENIED] }
+        resolved_by: { type: [string, "null"] }
+        resolution_reason: { type: [string, "null"] }
+        resolved_at: { type: [string, "null"], format: date-time }
+        created_at: { type: string, format: date-time }
+    Problem:
+      type: object
+      required: [type, title, status]
+      properties:
+        type: { type: string, format: uri-reference }
+        title: { type: string }
+        status: { type: integer, minimum: 400, maximum: 599 }
+        detail: { type: string }
+        instance: { type: string, format: uri-reference }
