@@ -147,10 +147,34 @@ npm run dev
 ```
 
 Open `http://localhost:3000` and enter the API key configured in `.env`. The key
-is held only in page state. The example policy uses the offline `stub` provider;
-to exercise the external adapter, set `semantic.provider: openai` and set a
-configuration-selected `semantic.model`. The application contains no default
-OpenAI model identifier.
+is held only in page memory across Overview and Benchmark navigation; it is
+cleared by Disconnect or a full reload. Overview shows a bounded snapshot of
+the latest 100 audit events, with 12 rows per page and filters for decision,
+agent, request type, and request ID/reason text. Its summary and activity counts
+cover that 100-event sample, not all historical events. Event details expose
+recorded safe metadata, redaction summaries, scores, request IDs and fingerprints.
+The audit log does not retain sanitized content, exact failed deterministic
+facts, or all matched rule IDs, so the detail drawer marks those unavailable.
+
+Live data refreshes about every five seconds while the page is visible. Hidden
+tabs pause; returning to the tab refreshes immediately. Manual Refresh and
+Approve/Deny refresh immediately, and a temporary backend outage leaves the
+last successful view visible. Policy definitions and benchmark reports are
+loaded on navigation or explicit refresh, not polled every five seconds.
+
+The compact Self-tests card reads the latest real backend pytest summary. Run
+`cd backend && uv run pytest` to write `backend/latest_test_results.json`
+atomically; the dashboard never starts tests. `GET /api/v1/tests/latest`
+requires a `viewer` or `admin` key and returns only counts, duration, completion
+time, and run status. It returns `null` until a run exists. Set
+`CONTROL_LAYER_TEST_RESULTS_PATH` to the same path for pytest and the API if
+using a custom location. The top-nav theme switch follows the system preference
+on first visit and saves an explicit light/dark choice locally in the browser.
+
+The example policy currently configures the `openai` semantic provider and a
+model in YAML. Both can be changed without code edits; the application contains
+no default OpenAI model identifier. Without provider credentials, the configured
+failure policy applies to evaluations.
 
 To benchmark an account-available candidate before pinning it, use a separate
 policy file with `semantic.provider: openai` and its configured model, then run:
@@ -166,3 +190,83 @@ uv run python scripts/benchmark_semantic.py \
 The included corpus is a small smoke fixture, not a production evaluation set;
 expand it with representative multilingual, obfuscated, benign, and adversarial
 examples before selecting and pinning a provider snapshot.
+
+### Benchmark results dashboard
+
+Open `/benchmark` in the dashboard and connect with a `viewer` or `admin` API key.
+The page is read-only: it never starts a benchmark. Until a report exists it shows
+**No benchmark results yet** after connecting. No demo scores are seeded.
+The included eight-case corpus and its results are a **smoke-test benchmark, not
+production-grade validation**. Scores do not validate the overall security layer.
+
+Run the existing harness manually, in a shell with `OPENAI_API_KEY` exported:
+
+```bash
+cd backend
+uv run python scripts/benchmark_semantic.py \
+  --policy ../policies/example.policy.yaml \
+  --schema ../policies/policy.schema.json \
+  --corpus tests/fixtures/security_corpus.jsonl \
+  --output benchmark-results/latest.json
+```
+
+This calls the configured external model and may incur API charges. No model is
+hard-coded. The CLI also defaults to the same `CONTROL_LAYER_POLICY_PATH` and
+`CONTROL_LAYER_POLICY_SCHEMA_PATH` configuration as the backend. It freezes one
+validated YAML snapshot at run start and uses the **exact per-label thresholds
+and comparison operators** in that snapshot (currently injection `>= 0.65`,
+exfiltration `>= 0.8`). It does not use the old shared `0.65` default.
+If a policy was edited on disk but not reloaded in a running server, reload it
+first when you want the benchmark to represent the live policy. The report stores
+its policy hash; the dashboard warns when that hash differs from the live server.
+
+Optional `--prompt-injection-threshold` and `--data-exfiltration-threshold` flags
+explicitly override a label with a `>=` cutoff. The retained `--threshold` flag
+overrides both; per-label flags take precedence. Overrides are marked in JSON and
+the UI. Missing, disabled, compound, unsupported, or conflicting policy cutoffs
+require an explicit override rather than an invented threshold. No policy is edited.
+
+The CLI emits one complete JSON document to stdout and atomically publishes the
+same report to `--output`. Exit codes: `0` = all cases scored; `2` = completed run
+with provider failures (report still saved); `1` = invalid configuration/input or
+unreadable files (no report published). The latest report replaces the previous
+one; use a separate `--output` path to retain other runs. Interrupted runs leave
+the previous complete report in place. Reports under `backend/benchmark-results/`
+are git-ignored, and test reports stay in temporary directories.
+
+`CONTROL_LAYER_BENCHMARK_PATH` configures the CLI's default output and the API's
+read path. Both default to `backend/benchmark-results/latest.json` relative to the
+repository root; explicitly configured relative paths resolve from each process's
+working directory. `GET /api/v1/benchmarks/latest` requires `viewer` (or `admin`),
+returns JSON `null` if absent, and returns a generic 503 for an invalid report.
+It does not execute classifiers or modify events, budgets, approvals, or policy.
+
+Reports contain UTC timestamps, configured and provider-reported model IDs, policy
+and corpus hashes, thresholds, coverage, latency, runtime, per-label metrics and
+TP/TN/FP/FN counts. A snapshot is displayed only when a unique dated model ID was
+actually reported; aliases remain explicitly unverified. Per-case rows use
+sequential opaque IDs corresponding to nonblank corpus rows. Neither prompt text
+(raw or sanitized), original corpus IDs, provider response text, nor exception
+messages are exported. The existing sanitizer still runs before classification.
+
+Coverage is successful classifications divided by all corpus cases. Provider
+failures have null predictions/scores and are excluded from classification metrics;
+they are not safe negatives. Accuracy is `(TP+TN)/evaluated`, precision `TP/(TP+FP)`,
+recall `TP/(TP+FN)`, F1 `2TP/(2TP+FP+FN)`, false-positive rate `FP/(FP+TN)` and
+false-negative rate `FN/(FN+TP)`. Undefined denominators yield null / **N/A**.
+Average latency covers every classification attempt, including failures; total
+runtime covers sanitization and classification of the corpus, excluding file I/O
+and initial client setup.
+
+Cost is **Unavailable** by default, never a fabricated zero. Supply `--pricing`
+with a JSON object containing `model` (exact configured ID),
+`input_usd_per_million`, `output_usd_per_million`, and optionally
+`cached_input_usd_per_million`, using rates you have verified for your account.
+The report records these explicit rates and estimates USD from provider-reported
+usage. If any attempt lacks usage, cached tokens lack a price, or cache-write
+tokens are reported, the total remains unavailable. This is an estimate, not an
+invoice; account discounts and other billing adjustments are not inferred.
+
+Response metadata fields follow the [OpenAI Responses reference](https://developers.openai.com/api/reference/python/resources/responses/methods/retrieve).
+Metadata collection is benchmark-only through the adapter's existing injectable
+client; the semantic interface, normal evaluation flow, and decision engine are unchanged.

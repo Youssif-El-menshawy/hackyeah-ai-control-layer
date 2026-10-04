@@ -99,6 +99,33 @@ class SQLiteRepository:
         row = self._connection.execute("SELECT * FROM events WHERE request_id=?", (request_id,)).fetchone()
         return self._decode_event(row) if row else None
 
+    def get_event(self, evaluation_id: str) -> dict[str, Any] | None:
+        row = self._connection.execute("SELECT * FROM events WHERE evaluation_id=?", (evaluation_id,)).fetchone()
+        return self._decode_event(row) if row else None
+
+    def event_page(self, limit: int, *, decision=None, agent_id=None, input_type=None, search=None, before=None):
+        clauses, values = [], []
+        for column, value in (("decision", decision), ("agent_id", agent_id), ("input_type", input_type)):
+            if value:
+                clauses.append(f"{column}=?")
+                values.append(value)
+        if search:
+            escaped = search.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            clauses.append("(request_id LIKE ? ESCAPE '\\' OR reason_codes LIKE ? ESCAPE '\\')")
+            values.extend([f"%{escaped}%"] * 2)
+        if before:
+            clauses.append("(created_at, evaluation_id) < (?, ?)")
+            values.extend(before)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        rows = self._connection.execute(
+            "SELECT * FROM events" + where + " ORDER BY created_at DESC, evaluation_id DESC LIMIT ?",
+            [*values, limit + 1],
+        ).fetchall()
+        return [self._decode_event(row) for row in rows[:limit]], len(rows) > limit
+
+    def pending_approval_count(self) -> int:
+        return self._connection.execute("SELECT COUNT(*) FROM approvals WHERE status='PENDING'").fetchone()[0]
+
     def list_events(self, limit: int = 50, decision: str | None = None) -> list[dict[str, Any]]:
         if decision:
             rows = self._connection.execute(
@@ -132,14 +159,20 @@ class SQLiteRepository:
         )
         return approval_id
 
-    def list_approvals(self, limit: int = 50) -> list[dict[str, Any]]:
-        rows = self._connection.execute("SELECT * FROM approvals ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    def list_approvals(self, limit: int = 50, status: str | None = None, offset: int = 0) -> list[dict[str, Any]]:
+        where = " WHERE status=?" if status else ""
+        values = ([status] if status else []) + [limit, offset]
+        rows = self._connection.execute("SELECT * FROM approvals" + where + " ORDER BY created_at DESC LIMIT ? OFFSET ?", values).fetchall()
         return [dict(row) for row in rows]
 
     def approval_for_evaluation(self, evaluation_id: str) -> dict[str, Any] | None:
         row = self._connection.execute(
             "SELECT * FROM approvals WHERE evaluation_id=?", (evaluation_id,)
         ).fetchone()
+        return dict(row) if row else None
+
+    def get_approval(self, approval_id: str) -> dict[str, Any] | None:
+        row = self._connection.execute("SELECT * FROM approvals WHERE approval_id=?", (approval_id,)).fetchone()
         return dict(row) if row else None
 
     def resolve_approval(self, approval_id: str, status: str, actor: str, reason: str | None, at: str) -> bool:
